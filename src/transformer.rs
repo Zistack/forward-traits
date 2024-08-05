@@ -26,7 +26,7 @@ use syn
 use syn::punctuated::Punctuated;
 use syn::parse::{Result, Error};
 use syn::fold::Fold;
-use quote::ToTokens;
+use quote::{quote, ToTokens};
 
 use crate::syn::transformable_types::*;
 
@@ -390,23 +390,43 @@ impl Transformer
 		Ok ((output, false))
 	}
 
-	fn transform_output_result (&mut self, output: Expr, inner_type: &Type)
+	fn transform_output_result
+    (
+        &mut self,
+        mut output: Expr,
+        inner_type: &Type,
+        error_type: &Type
+    )
 	-> Result <(Expr, bool)>
 	{
+		let mut any_transformed: bool = false;
+
 		let inner_output = parse_quote! (v);
+		let error_output = parse_quote! (v);
 
 		if let (inner_output, true) =
 			self . transform_output (inner_output, inner_type)?
 		{
-			let output = parse_quote!
+			output = parse_quote!
 			(
 				#output . map (|v| #inner_output)
 			);
 
-			return Ok ((output, true));
+			any_transformed = true;
 		}
 
-		Ok ((output, false))
+		if let (error_output, true) =
+			self . transform_output (error_output, error_type)?
+		{
+			output = parse_quote!
+			(
+				#output . map_err (|v| #error_output)
+			);
+
+			any_transformed = true;
+		}
+
+        Ok ((output, any_transformed))
 	}
 
 	fn transform_output_tuple
@@ -522,10 +542,10 @@ impl Transformer
 		{
 			return self . transform_output_option (output, &option_type);
 		}
-		else if let Some (ResultType {result_type, ..}) =
+		else if let Some (ResultType {result_type, error_type, ..}) =
 			ResultType::match_type (output_type)
 		{
-			return self . transform_output_result (output, &result_type);
+			return self . transform_output_result (output, &result_type, &error_type);
 		}
 		else if let Some (TupleType {types, ..}) =
 			TupleType::match_type (output_type)
@@ -616,6 +636,7 @@ impl Transformer
 				output,
 				..
 			},
+            attrs,
 			..
 		}
 			= item_fn;
@@ -629,10 +650,11 @@ impl Transformer
 		let call_expr =
 		{
 			let Self {delegated_type, forwarded_trait, ..} = &*self;
+            let await_expr = asyncness.is_some().then(|| quote! { .await });
 
 			parse_quote!
 			(
-				<#delegated_type as #forwarded_trait>::#ident (#args)
+				<#delegated_type as #forwarded_trait>::#ident (#args) #await_expr
 			)
 		};
 
@@ -649,6 +671,7 @@ impl Transformer
 
 		let item_fn = parse_quote!
 		{
+            #(#attrs)*
 			#constness #asyncness #unsafety fn #ident #impl_generics (#inputs)
 			#output
 			#where_clause
